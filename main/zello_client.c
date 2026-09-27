@@ -64,6 +64,9 @@ typedef struct {
 static esp_websocket_client_handle_t s_ws;
 static SemaphoreHandle_t s_lock;        // guards s_status, s_log and the seq/stream fields
 static SemaphoreHandle_t s_conn_lock;   // serializes connect/disconnect
+// Held around every use of s_ws, so tearing the client down cannot free it
+// under a send that is already in flight on another task.
+static SemaphoreHandle_t s_send_lock;
 static QueueHandle_t s_tx_q, s_rx_q;
 static void (*s_changed_cb)(void);
 
@@ -94,6 +97,20 @@ static void unlock(void) { xSemaphoreGive(s_lock); }
 static void notify(void)
 {
     if (s_changed_cb) s_changed_cb();
+}
+
+// The only path that touches s_ws to send. Returns false if there is no client
+// or the write failed.
+static bool ws_send(bool text, const char *data, int len)
+{
+    xSemaphoreTake(s_send_lock, portMAX_DELAY);
+    int sent = -1;
+    if (s_ws) {
+        sent = text ? esp_websocket_client_send_text(s_ws, data, len, pdMS_TO_TICKS(SEND_TIMEOUT_MS))
+                    : esp_websocket_client_send_bin(s_ws, data, len, pdMS_TO_TICKS(SEND_TIMEOUT_MS));
+    }
+    xSemaphoreGive(s_send_lock);
+    return sent >= 0;
 }
 
 // ---- log -------------------------------------------------------------------
@@ -199,10 +216,10 @@ static bool send_command(cJSON *root, int seq)
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!text) return false;
-    int sent = s_ws ? esp_websocket_client_send_text(s_ws, text, strlen(text), pdMS_TO_TICKS(SEND_TIMEOUT_MS)) : -1;
-    if (sent < 0) ESP_LOGW(TAG, "could not send a command");
+    bool ok = ws_send(true, text, strlen(text));
+    if (!ok) ESP_LOGW(TAG, "could not send a command");
     free(text);
-    return sent >= 0;
+    return ok;
 }
 
 static void send_logon(void)
@@ -344,8 +361,7 @@ static void tx_task(void *arg)
         packet[1] = stream >> 24; packet[2] = stream >> 16; packet[3] = stream >> 8; packet[4] = stream;
         packet[5] = id >> 24; packet[6] = id >> 16; packet[7] = id >> 8; packet[8] = id;
 
-        if (esp_websocket_client_send_bin(s_ws, (const char *)packet, PKT_HEADER_LEN + len,
-                                          pdMS_TO_TICKS(SEND_TIMEOUT_MS)) < 0) {
+        if (!ws_send(false, (const char *)packet, PKT_HEADER_LEN + len)) {
             ESP_LOGW(TAG, "dropped a voice packet");
             continue;
         }
@@ -398,7 +414,9 @@ static void rx_task(void *arg)
 
         if (s_stop_requested) {
             s_stop_requested = false;
+            xSemaphoreTake(s_conn_lock, portMAX_DELAY);
             if (s_ws) esp_websocket_client_stop(s_ws);
+            xSemaphoreGive(s_conn_lock);
         }
     }
 }
@@ -659,10 +677,11 @@ esp_err_t zello_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
     s_conn_lock = xSemaphoreCreateMutex();
+    s_send_lock = xSemaphoreCreateMutex();
     s_tx_q = xQueueCreate(TX_QUEUE_DEPTH, sizeof(tx_frame_t));
     s_rx_q = xQueueCreate(RX_QUEUE_DEPTH, sizeof(rx_packet_t));
     s_asm = malloc(MESSAGE_MAX);
-    if (!s_lock || !s_conn_lock || !s_tx_q || !s_rx_q || !s_asm) return ESP_ERR_NO_MEM;
+    if (!s_lock || !s_conn_lock || !s_send_lock || !s_tx_q || !s_rx_q || !s_asm) return ESP_ERR_NO_MEM;
 
     esp_err_t err = opus_codec_init();
     if (err != ESP_OK) return err;
@@ -698,18 +717,29 @@ static bool account_ready(const char **why)
     return true;
 }
 
-void zello_disconnect(void)
+// Tears the session down. Call with s_conn_lock held.
+static void disconnect_locked(void)
 {
-    xSemaphoreTake(s_conn_lock, portMAX_DELAY);
     s_want_connect = false;
     s_ptt_wanted = false;
     if (s_ws) {
-        esp_websocket_client_destroy(s_ws);
+        // Take the send lock first so no task is inside a write on the handle
+        // we are about to free.
+        xSemaphoreTake(s_send_lock, portMAX_DELAY);
+        esp_websocket_client_handle_t ws = s_ws;
         s_ws = NULL;
+        xSemaphoreGive(s_send_lock);
+        esp_websocket_client_destroy(ws);
     }
     xQueueReset(s_tx_q);
     xQueueReset(s_rx_q);
     audio_play_flush();
+}
+
+void zello_disconnect(void)
+{
+    xSemaphoreTake(s_conn_lock, portMAX_DELAY);
+    disconnect_locked();
     xSemaphoreGive(s_conn_lock);
     set_state(ZELLO_OFFLINE, NULL);
 }
@@ -721,8 +751,6 @@ esp_err_t zello_connect(void)
         set_state(ZELLO_OFFLINE, why);
         return ESP_ERR_INVALID_ARG;
     }
-
-    zello_disconnect();
 
     char url[160];
     settings_ws_url(url, sizeof(url));
@@ -741,7 +769,10 @@ esp_err_t zello_connect(void)
         .keep_alive_enable = true,
     };
 
+    // One lock across both halves: two reconnects racing here would otherwise
+    // each tear down the other's client.
     xSemaphoreTake(s_conn_lock, portMAX_DELAY);
+    disconnect_locked();
     s_ws = esp_websocket_client_init(&cfg);
     esp_err_t err = s_ws ? ESP_OK : ESP_FAIL;
     if (err == ESP_OK) err = esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, on_ws_event, NULL);
@@ -749,11 +780,7 @@ esp_err_t zello_connect(void)
         s_want_connect = true;
         err = esp_websocket_client_start(s_ws);
     }
-    if (err != ESP_OK && s_ws) {
-        esp_websocket_client_destroy(s_ws);
-        s_ws = NULL;
-        s_want_connect = false;
-    }
+    if (err != ESP_OK) disconnect_locked();
     xSemaphoreGive(s_conn_lock);
 
     if (err != ESP_OK) {
