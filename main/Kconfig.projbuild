@@ -1,0 +1,55 @@
+menu "Zello Client"
+
+    choice ZELLO_NETWORK
+        prompt "Zello network"
+        default ZELLO_NETWORK_CONSUMER
+        help
+            Consumer is the public zello.io network. Work is a Zello Work
+            network, reached as wss://zellowork.io/ws/<network>.
+
+        config ZELLO_NETWORK_CONSUMER
+            bool "Consumer (zello.io)"
+        config ZELLO_NETWORK_WORK
+            bool "Zello Work"
+    endchoice
+
+    config ZELLO_WORK_NETWORK
+        string "Zello Work network name"
+        default ""
+        help
+            The subdomain of your Zello Work network. Ignored on the consumer
+            network.
+
+    config ZELLO_USERNAME
+        string "Default Zello username"
+        default ""
+
+    config ZELLO_PASSWORD
+        string "Default Zello password"
+        default ""
+
+    config ZELLO_AUTH_TOKEN
+        string "Default developer token"
+        default ""
+        help
+            The JWT issued by the Zello developer console
+            (https://developers.zello.com). Required on the consumer network.
+            It is long, so entering it in the web config is usually easier
+            than here or on the device keyboard.
+
+    config ZELLO_CHANNEL
+        string "Default channel"
+        default ""
+        help
+            Channel joined at logon. Can be changed at runtime on screen, in
+            the web config, or with the console command "channel <name>".
+
+    config ZELLO_WIFI_SSID
+        string "Default Wi-Fi SSID"
+        default ""
+
+    config ZELLO_WIFI_PASSWORD
+        string "Default Wi-Fi password"
+        default ""
+
+endmenu
