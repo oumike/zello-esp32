@@ -12,7 +12,7 @@ DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
 PIO_CORE_DIR="${ZELLO_PIO_CORE_DIR:-${ZELLO_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}}"
 # ESP-IDF refuses a build directory whose path contains a space, and this
 # project sits under "/Volumes/T7 Shield/...", so build outside it.
-BUILD_DIR="${ZELLO_BUILD_DIR:-$PIO_CORE_DIR/build/zello-esp32}"
+BUILD_DIR="${ZELLO_BUILD_DIR:-$PIO_CORE_DIR/build/scheff-zello}"
 PORT=""
 ERASE_FIRST=false
 FULLCLEAN=false

@@ -1,5 +1,6 @@
 // Wi-Fi setup: shown on first boot (no saved network). Scan and pick from a
-// list, or type the SSID; then the password (not masked) and Join.
+// list, or type the SSID; then the password (not masked) and Join. The scan
+// list and the join are shared with Settings, which changes networks later.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,14 +24,20 @@ static net_wifi_ap_t s_aps[SCAN_MAX];
 static int s_ap_count;
 static bool s_scanning;
 
+// Where the scan list goes back to, and who hears about the network picked.
+static lv_obj_t *s_scan_back_to;
+static void (*s_scan_picked)(const net_wifi_ap_t *ap);
+
 typedef struct {
     char ssid[33];
     char pass[65];
+    bool keep_old;  // on failure, go back to the saved network
 } join_req_t;
 
 static join_req_t s_joined;  // the network that just joined, saved after "Connected!"
 
 static void start_scan(void);
+static void scan_close(void);
 
 // ---- join ------------------------------------------------------------------
 
@@ -46,9 +53,9 @@ static void joined_continue(void)
 void ui_wifi_destroy(void)
 {
     if (s_setup_scr) lv_obj_delete_async(s_setup_scr);
-    if (s_scan_scr) lv_obj_delete_async(s_scan_scr);
-    s_setup_scr = s_scan_scr = NULL;
+    s_setup_scr = NULL;
     s_web_hint = NULL;
+    scan_close();
 }
 
 static void join_worker(void *arg)
@@ -57,6 +64,12 @@ static void join_worker(void *arg)
     net_join_result_t res = net_wifi_join(req->ssid, req->pass, JOIN_TIMEOUT);
 
     char msg[128];
+    // A failed join leaves the station down; after onboarding that would
+    // strand the device, so rejoin the network it was on.
+    if (res != NET_JOIN_OK && req->keep_old && g_settings.wifi_ssid[0]) {
+        net_wifi_connect(g_settings.wifi_ssid, g_settings.wifi_pass);
+    }
+
     display_lock();
     if (res == NET_JOIN_OK) s_joined = *req;
     switch (res) {
@@ -83,18 +96,13 @@ static void join_worker(void *arg)
     free(req);
 }
 
-static void join_clicked(lv_event_t *e)
+void ui_wifi_join(const char *ssid, const char *pass, bool keep_old)
 {
-    const char *ssid = lv_textarea_get_text(s_ssid);
-    if (!ssid[0]) {
-        ui_modal_message("Enter a network name first,\nor tap Scan.", UI_COLOR_WARN, true, NULL);
-        return;
-    }
     join_req_t *req = calloc(1, sizeof(*req));
     if (!req) return;
     strlcpy(req->ssid, ssid, sizeof(req->ssid));
-    strlcpy(req->pass, lv_textarea_get_text(s_pass), sizeof(req->pass));
-    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    strlcpy(req->pass, pass, sizeof(req->pass));
+    req->keep_old = keep_old;
 
     char msg[80];
     snprintf(msg, sizeof(msg), "Connecting to\n%s...", req->ssid);
@@ -102,22 +110,42 @@ static void join_clicked(lv_event_t *e)
     ui_run_async("wifi_join", join_worker, req);
 }
 
+static void join_clicked(lv_event_t *e)
+{
+    const char *ssid = lv_textarea_get_text(s_ssid);
+    if (!ssid[0]) {
+        ui_modal_message("Enter a network name first,\nor tap Scan.", UI_COLOR_WARN, true, NULL);
+        return;
+    }
+    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    ui_wifi_join(ssid, lv_textarea_get_text(s_pass), false);
+}
+
 // ---- scan screen -----------------------------------------------------------
+
+void ui_wifi_prompt_password(lv_obj_t *pass, bool secure)
+{
+    lv_textarea_set_text(pass, "");
+    // Prompt for the password straight away; an open network skips it.
+    if (secure) {
+        lv_obj_add_state(pass, LV_STATE_FOCUSED);
+        lv_obj_send_event(pass, LV_EVENT_FOCUSED, NULL);
+    }
+}
+
+static void setup_picked(const net_wifi_ap_t *ap)
+{
+    lv_textarea_set_text(s_ssid, ap->ssid);
+    lv_label_set_text(s_hint, ap->secure ? HINT_DEFAULT : HINT_OPEN);
+    lv_obj_set_style_text_color(s_hint, ap->secure ? UI_COLOR_MUTED : UI_COLOR_GO_LIT, 0);
+    ui_wifi_prompt_password(s_pass, ap->secure);
+}
 
 static void ap_clicked(lv_event_t *e)
 {
     const net_wifi_ap_t *ap = &s_aps[(int)(intptr_t)lv_event_get_user_data(e)];
-    lv_textarea_set_text(s_ssid, ap->ssid);
-    lv_textarea_set_text(s_pass, "");
-    lv_label_set_text(s_hint, ap->secure ? HINT_DEFAULT : HINT_OPEN);
-    lv_obj_set_style_text_color(s_hint, ap->secure ? UI_COLOR_MUTED : UI_COLOR_GO_LIT, 0);
-
-    lv_screen_load_anim(s_setup_scr, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
-    // Prompt for the password straight away; an open network skips it.
-    if (ap->secure) {
-        lv_obj_add_state(s_pass, LV_STATE_FOCUSED);
-        lv_obj_send_event(s_pass, LV_EVENT_FOCUSED, NULL);
-    }
+    lv_screen_load_anim(s_scan_back_to, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    s_scan_picked(ap);
 }
 
 static const char *signal_text(int8_t rssi)
@@ -183,7 +211,13 @@ static void start_scan(void)
 
 static void scan_back(lv_event_t *e)
 {
-    lv_screen_load_anim(s_setup_scr, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    lv_screen_load_anim(s_scan_back_to, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+}
+
+static void scan_close(void)
+{
+    if (s_scan_scr) lv_obj_delete_async(s_scan_scr);
+    s_scan_scr = NULL;
 }
 
 static void scan_again(lv_event_t *e)
@@ -216,12 +250,24 @@ static void build_scan_screen(void)
     s_scan_again = ui_button(col, LV_SYMBOL_REFRESH "  Scan again", UI_COLOR_ACCENT, scan_again, NULL);
 }
 
-static void scan_clicked(lv_event_t *e)
+void ui_wifi_scan(lv_obj_t *back_to, void (*picked)(const net_wifi_ap_t *ap))
 {
-    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    s_scan_back_to = back_to;
+    s_scan_picked = picked;
     if (!s_scan_scr) build_scan_screen();
     lv_screen_load_anim(s_scan_scr, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     start_scan();
+}
+
+void ui_wifi_scan_destroy(void)
+{
+    scan_close();
+}
+
+static void scan_clicked(lv_event_t *e)
+{
+    lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
+    ui_wifi_scan(s_setup_scr, setup_picked);
 }
 
 // ---- setup screen ----------------------------------------------------------
@@ -244,8 +290,7 @@ void ui_wifi_show(void)
 
     ui_button(col, "Join", UI_COLOR_GO, join_clicked, NULL);
 
-    s_web_hint = ui_label(col, "", UI_FONT_SMALL, UI_COLOR_MUTED);
-    ui_web_hint_update(s_web_hint);
+    s_web_hint = ui_web_hint(col);
 
     if (g_settings.wifi_ssid[0]) lv_textarea_set_text(s_ssid, g_settings.wifi_ssid);
     lv_screen_load(s_setup_scr);

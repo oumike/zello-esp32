@@ -1,6 +1,7 @@
 // Home, which on Zello is also the talk screen: who you are, which channel
 // you're in, the recent channel activity, and one big hold-to-talk button.
-// Channels and the account are edited from the two buttons at the top.
+// Channels and Settings (Wi-Fi and the account) open from the two buttons
+// at the top.
 
 #include <stdio.h>
 #include <string.h>
@@ -21,7 +22,7 @@ static char s_status_cache[160];
 
 // ---- header ----------------------------------------------------------------
 
-static void account_clicked(lv_event_t *e)
+static void settings_clicked(lv_event_t *e)
 {
     ui_account_edit();
 }
@@ -198,7 +199,7 @@ void ui_home_show(void)
         lv_obj_set_style_border_width(buttons, 0, 0);
         lv_obj_remove_flag(buttons, LV_OBJ_FLAG_SCROLLABLE);
         icon_button(buttons, LV_SYMBOL_LIST "  Channels", channels_clicked);
-        icon_button(buttons, LV_SYMBOL_EDIT "  Account", account_clicked);
+        icon_button(buttons, LV_SYMBOL_SETTINGS "  Settings", settings_clicked);
 
         s_status = ui_label(col, "", UI_FONT_SMALL, UI_COLOR_MUTED);
         s_web = ui_label(col, "", UI_FONT_SMALL, UI_COLOR_MUTED);

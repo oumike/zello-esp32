@@ -60,6 +60,11 @@ void channel_list_record_join(const char *name);
 // ESP_ERR_NOT_FOUND if it holds none, in which case nothing changes.
 esp_err_t channel_list_import_buffer(const char *xml, size_t *count);
 
+// Replaces the whole list with the named entries of `entries` (the first of a
+// repeated name wins) and saves it. ESP_ERR_NOT_FOUND if none has a name, in
+// which case nothing changes.
+esp_err_t channel_list_replace(const channel_entry_t *entries, size_t n, size_t *count);
+
 // Appends the list as <channel .../> elements, one per line, indented by
 // `indent`. Used for both the file on /data and the backup download.
 #include "xml_util.h"

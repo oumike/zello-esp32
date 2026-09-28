@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS "app_main.c" "board.c" "display.c" "audio.c" "ptt.c" "sdcard.c"
-         "lv_mem_psram.c" "net_wifi.c" "settings.c" "xml_util.c" "channel_list.c"
+         "lv_mem_psram.c" "net_wifi.c" "settings.c" "xml_util.c" "yaml_util.c" "channel_list.c"
          "opus_codec.c" "zello_client.c" "onboard.c" "web_config.c"
          "console_cmds.c"
          "ui.c" "ui_wifi.c" "ui_account.c" "ui_channels.c" "ui_home.c"

@@ -44,7 +44,10 @@ void app_main(void)
     web_config_start();
 
     ptt_button_start();
-    if (disp_err == ESP_OK) ui_start();
+    if (disp_err == ESP_OK) {
+        ui_start();
+        display_reveal();
+    }
 
     // Signing in needs both an address and a clock the TLS handshake can trust,
     // so wait for DHCP and then for SNTP rather than failing the first attempt.

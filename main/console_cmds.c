@@ -6,6 +6,7 @@
 #include <strings.h>
 #include "esp_console.h"
 #include "audio.h"
+#include "display.h"
 #include "channel_list.h"
 #include "net_wifi.h"
 #include "settings.h"
@@ -154,6 +155,18 @@ static int cmd_log(int argc, char **argv)
     return 0;
 }
 
+static int cmd_dsipattern(int argc, char **argv)
+{
+    bool on = on_off(argc >= 2 ? argv[1] : NULL, display_test_pattern());
+    esp_err_t err = display_set_test_pattern(on);
+    if (err != ESP_OK) {
+        printf("Couldn't switch the test pattern: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    printf("DSI test pattern %s\n", on ? "on: colour bars, no frame buffer reads" : "off");
+    return 0;
+}
+
 static int cmd_loopback(int argc, char **argv)
 {
     bool on = on_off(argc >= 2 ? argv[1] : NULL, audio_loopback());
@@ -172,7 +185,7 @@ void console_start(void)
 {
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t rc = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    rc.prompt = "zello>";
+    rc.prompt = "scheff>";
     // A developer token pasted into "set auth_token ..." is the longest line
     // anyone will type here.
     rc.max_cmdline_length = SETTINGS_TOKEN_MAX + 64;
@@ -203,6 +216,8 @@ void console_start(void)
     reg("text", "Send a text message to the channel", "<text>", cmd_text);
     reg("log", "Show recent channel activity", NULL, cmd_log);
     reg("loopback", "Mic to speaker loopback test", "[on|off]", cmd_loopback);
+    reg("dsipattern", "Display test: colour bars from the DSI controller, no PSRAM reads", "[on|off]",
+        cmd_dsipattern);
 
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
 }

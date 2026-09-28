@@ -10,9 +10,18 @@ CONFIG_SPIRAM_MODE_HEX=y
 CONFIG_SPIRAM_SPEED_200M=y
 # Keep internal DMA-capable RAM for ESP-Hosted SDIO buffers.
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+# Run code and read-only data from PSRAM, so a flash write (the channel list
+# saves on every join) doesn't have to suspend the cache. Without this, the
+# interrupt that restarts the display's scan-out DMA each frame can't run
+# during an erase, and the panel flashes blue.
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 
-CONFIG_CACHE_L2_CACHE_256KB=y
-CONFIG_CACHE_L2_CACHE_LINE_128B=y
+# The L2 cache as the Arduino core (and camillia-mt, on this board) has it.
+# 256 KB with 128-byte lines left the display flashing blue now and then: the
+# DSI scan-out reads its frame buffer from PSRAM through the same memory
+# system. A smaller cache also leaves 128 KB more internal RAM for the heap.
+CONFIG_CACHE_L2_CACHE_128KB=y
+CONFIG_CACHE_L2_CACHE_LINE_64B=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 CONFIG_FREERTOS_HZ=1000
@@ -40,7 +49,7 @@ CONFIG_LV_THEME_DEFAULT_DARK=y
 # Long file names for zello-channels.xml.
 CONFIG_FATFS_LFN_HEAP=y
 
-# Web config: phones' captive-portal probes send long headers.
+# Web config: browsers can send long request headers.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
 # wss://zello.io: TLS with the bundled root store, and a Zello developer token

@@ -328,7 +328,7 @@ void ui_channels_onboard(void)
     s_onboarding = true;
     lv_obj_t *col = build(NULL, "Choose a Channel",
                           "Type the name of a Zello channel to join. You can add more later and switch between them.");
-    ui_web_hint_update(ui_label(col, "", UI_FONT_SMALL, UI_COLOR_MUTED));
+    ui_web_hint(col);
     lv_screen_load(s_root);
 }
 

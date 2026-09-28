@@ -9,6 +9,7 @@
 #include "lvgl.h"
 #include "channel_list.h"
 #include "display.h"
+#include "net_wifi.h"
 
 #define UI_PAD    16
 #define UI_GAP    14
@@ -24,7 +25,7 @@
 #define UI_FONT_SMALL (&lv_font_montserrat_20)
 #define UI_FONT       (&lv_font_montserrat_28)
 #define UI_FONT_TITLE (&lv_font_montserrat_36)
-#define UI_STATUS_BAR_W     128
+#define UI_STATUS_BAR_W     176
 #define UI_STATUS_BAR_H     48
 #define UI_SPINNER_SIZE     96
 #define UI_ICON_BUTTON_SIZE 80
@@ -50,7 +51,17 @@
 // ---- screens ----
 void ui_wifi_show(void);
 void ui_wifi_destroy(void);
-// Account form: full screen during onboarding, an overlay when editing.
+// The scan list as its own screen: picking a network (or Back) returns to
+// `back_to`, and `picked` hears which one.
+void ui_wifi_scan(lv_obj_t *back_to, void (*picked)(const net_wifi_ap_t *ap));
+void ui_wifi_scan_destroy(void);
+// Clears `pass` and, for a secured network, focuses it for typing.
+void ui_wifi_prompt_password(lv_obj_t *pass, bool secure);
+// Joins in the background behind a busy modal. Success saves the network and
+// restarts; failure says why, and with `keep_old` rejoins the saved network.
+void ui_wifi_join(const char *ssid, const char *pass, bool keep_old);
+// Account form during onboarding; after it, Settings: Wi-Fi and the account
+// on one screen behind one Save.
 void ui_account_onboard(void);
 void ui_account_edit(void);
 void ui_account_destroy(void);
@@ -64,6 +75,9 @@ void ui_home_refresh_account(void);
 // Fills `label` with how to reach the web config right now (setup hotspot
 // and/or the device's IP); empty when neither is up.
 void ui_web_hint_update(lv_obj_t *label);
+// A web-config hint label under `parent` that keeps itself current as the
+// hotspot comes and goes and the station gets an address.
+lv_obj_t *ui_web_hint(lv_obj_t *parent);
 
 // ---- building blocks ----
 

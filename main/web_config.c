@@ -11,7 +11,6 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "lwip/sockets.h"
 #include "audio.h"
 #include "channel_list.h"
 #include "net_wifi.h"
@@ -19,27 +18,27 @@
 #include "sdcard.h"
 #include "settings.h"
 #include "xml_util.h"
+#include "yaml_util.h"
 #include "zello_client.h"
 
 static const char *TAG = "web";
 
 #define JOIN_TIMEOUT_MS 20000
-// After station Wi-Fi connects, keep the hotspot a little longer so the phone
-// can show the device's new address before it drops.
-#define AP_LINGER_MS 60000
 // A developer token is a long JWT, so the account POST is the biggest body we
 // accept by a wide margin.
 #define BODY_MAX   2048
 #define SCAN_MAX   30
 #define IMPORT_MAX (64 * 1024)
-#define BACKUP_FILE_NAME "zello-p4-backup.xml"
+#define BACKUP_FILE_NAME "scheff-zello-backup.yaml"
 #define SD_BACKUP_PATH   SDCARD_MOUNT "/" BACKUP_FILE_NAME
+// Before the rename to Scheff for Zello (and YAML) the SD card backup was
+// zello-p4-backup.xml; a card may still hold one, and import reads it.
+#define SD_LEGACY_BACKUP_PATH SDCARD_MOUNT "/zello-p4-backup.xml"
 
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
 static httpd_handle_t s_httpd;
-static volatile bool s_dns_run;
 static bool s_ap_stop_pending;
 
 static struct {
@@ -48,52 +47,6 @@ static struct {
     char pass[65];
     char msg[96];
 } s_join;
-
-// ---- captive DNS: every name resolves to the setup hotspot ------------------
-
-static void dns_task(void *arg)
-{
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(53), .sin_addr.s_addr = htonl(INADDR_ANY)};
-    if (fd < 0 || bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "DNS bind failed");
-        if (fd >= 0) close(fd);
-        s_dns_run = false;
-        vTaskDelete(NULL);
-    }
-    struct timeval tv = {.tv_sec = 1};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    uint8_t buf[512];
-    while (s_dns_run) {
-        struct sockaddr_in from;
-        socklen_t fl = sizeof(from);
-        int n = recvfrom(fd, buf, sizeof(buf) - 16, 0, (struct sockaddr *)&from, &fl);
-        if (n < 12) continue;
-        if (buf[2] & 0x80 || (buf[2] & 0x78) || buf[5] != 1) continue;  // queries with one question only
-
-        // Walk the question name to find its type.
-        int p = 12;
-        while (p < n && buf[p]) p += buf[p] + 1;
-        if (p + 5 > n) continue;
-        uint16_t qtype = (buf[p + 1] << 8) | buf[p + 2];
-        int qend = p + 5;
-
-        buf[2] = 0x84 | (buf[2] & 0x01);  // response, authoritative, keep RD
-        buf[3] = 0x80;                    // RA, no error
-        buf[6] = 0, buf[7] = qtype == 1 ? 1 : 0;
-        buf[8] = buf[9] = buf[10] = buf[11] = 0;
-        int len = qend;
-        if (qtype == 1) {  // A: 192.168.4.1; anything else gets no answers
-            static const uint8_t ans[] = {0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 168, 4, 1};
-            memcpy(buf + qend, ans, sizeof(ans));
-            len += sizeof(ans);
-        }
-        sendto(fd, buf, len, 0, (struct sockaddr *)&from, fl);
-    }
-    close(fd);
-    vTaskDelete(NULL);
-}
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -156,37 +109,127 @@ static const char *json_str(cJSON *obj, const char *key)
 
 // ---- backup ----------------------------------------------------------------
 
-// The backup is the settings element plus the channel list, in the same shape
-// channel_list.c writes to /data, so either file can be imported.
-static esp_err_t backup_write(xml_write_cb_t write, void *ctx)
+// The backup is YAML: every setting, then the channel list. Strings are
+// always quoted, so a password full of punctuation survives a hand edit.
+static esp_err_t backup_write(yaml_write_cb_t write, void *ctx)
 {
-    esp_err_t err = xml_write_text(write, ctx,
-                                   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                                   "<zello-backup version=\"1\">\n"
-                                   "  <settings version=\"1\"");
-#define WRITE_ATTR(call) do { if (err == ESP_OK) err = call; } while (0)
-    WRITE_ATTR(xml_write_attr(write, ctx, "network", g_settings.network == ZELLO_NET_WORK ? "work" : "consumer"));
-    WRITE_ATTR(xml_write_attr(write, ctx, "username", g_settings.username));
-    WRITE_ATTR(xml_write_attr(write, ctx, "password", g_settings.password));
-    WRITE_ATTR(xml_write_attr(write, ctx, "auth_token", g_settings.auth_token));
-    WRITE_ATTR(xml_write_attr(write, ctx, "work_network", g_settings.work_network));
-    WRITE_ATTR(xml_write_attr(write, ctx, "channel", g_settings.channel));
-    WRITE_ATTR(xml_write_attr(write, ctx, "wifi_ssid", g_settings.wifi_ssid));
-    WRITE_ATTR(xml_write_attr(write, ctx, "wifi_pass", g_settings.wifi_pass));
-    WRITE_ATTR(xml_write_attr_u32(write, ctx, "volume", g_settings.volume));
-    WRITE_ATTR(xml_write_attr_u32(write, ctx, "mic_gain", g_settings.mic_gain));
-    WRITE_ATTR(xml_write_attr_bool(write, ctx, "auto_connect", g_settings.auto_connect));
-    WRITE_ATTR(xml_write_attr_bool(write, ctx, "ptt_latch", g_settings.ptt_latch));
-#undef WRITE_ATTR
-    if (err == ESP_OK) err = xml_write_text(write, ctx, "/>\n  <channels>\n");
-    if (err == ESP_OK) err = channel_list_write(write, ctx, "    ");
-    if (err == ESP_OK) err = xml_write_text(write, ctx, "  </channels>\n</zello-backup>\n");
+    channel_entry_t *list = heap_caps_malloc(CHANNEL_LIST_MAX * sizeof(*list), MALLOC_CAP_SPIRAM);
+    if (!list) return ESP_ERR_NO_MEM;
+    size_t n = channel_list_get(NULL, false, list, CHANNEL_LIST_MAX);
+
+    esp_err_t err = yaml_write_text(write, ctx,
+                                    "# Scheff for Zello backup: every setting and the channel list.\n"
+                                    "# It holds your Wi-Fi password, Zello password and developer token\n"
+                                    "# in clear text; store it accordingly.\n"
+                                    "scheff-backup: 1\n"
+                                    "settings:\n");
+#define W(call) do { if (err == ESP_OK) err = call; } while (0)
+    W(yaml_write_str(write, ctx, "  ", "network", g_settings.network == ZELLO_NET_WORK ? "work" : "consumer"));
+    W(yaml_write_str(write, ctx, "  ", "username", g_settings.username));
+    W(yaml_write_str(write, ctx, "  ", "password", g_settings.password));
+    W(yaml_write_str(write, ctx, "  ", "auth_token", g_settings.auth_token));
+    W(yaml_write_str(write, ctx, "  ", "work_network", g_settings.work_network));
+    W(yaml_write_str(write, ctx, "  ", "channel", g_settings.channel));
+    W(yaml_write_str(write, ctx, "  ", "wifi_ssid", g_settings.wifi_ssid));
+    W(yaml_write_str(write, ctx, "  ", "wifi_pass", g_settings.wifi_pass));
+    W(yaml_write_u32(write, ctx, "  ", "volume", g_settings.volume));
+    W(yaml_write_u32(write, ctx, "  ", "mic_gain", g_settings.mic_gain));
+    W(yaml_write_bool(write, ctx, "  ", "auto_connect", g_settings.auto_connect));
+    W(yaml_write_bool(write, ctx, "  ", "ptt_latch", g_settings.ptt_latch));
+    W(yaml_write_text(write, ctx, n ? "channels:\n" : "channels: []\n"));
+    for (size_t i = 0; i < n; i++) {
+        W(yaml_write_str(write, ctx, "  - ", "name", list[i].name));
+        W(yaml_write_str(write, ctx, "    ", "desc", list[i].desc));
+        W(yaml_write_bool(write, ctx, "    ", "favorite", list[i].favorite));
+        W(yaml_write_u32(write, ctx, "    ", "uses", list[i].uses));
+    }
+#undef W
+    free(list);
     return err;
 }
 
-// Reads the <settings> element out of `xml`. `*found` says whether there was
-// one at all: a bare channel list is a valid thing to import.
-static esp_err_t backup_parse_settings(const char *xml, settings_t *settings, bool *found)
+// What a YAML backup held. Settings start as the current ones, so a file that
+// lists only some of them (a hand-trimmed one, say) changes only those.
+typedef struct {
+    settings_t settings;
+    bool has_settings, has_channels;
+    channel_entry_t *channels;
+    size_t count;
+    int item;  // the list index `channels[count - 1]` came from
+} yaml_backup_t;
+
+static esp_err_t backup_yaml_value(void *ctx, const char *section, int item, const char *key, const char *value)
+{
+    yaml_backup_t *b = ctx;
+    if (!section) {
+        // "zello-backup" is what the first YAML backups called it.
+        if (key && (!strcmp(key, "scheff-backup") || !strcmp(key, "zello-backup")) && strcmp(value, "1")) {
+            return ESP_ERR_INVALID_VERSION;
+        }
+        return ESP_OK;  // other top-level keys are not ours to judge
+    }
+
+    if (!strcmp(section, "settings")) {
+        b->has_settings = true;
+        if (!key) return ESP_OK;
+        settings_t *s = &b->settings;
+        uint32_t number;
+#define STR(field) \
+    if (!strcmp(key, #field)) \
+        return strlcpy(s->field, value, sizeof(s->field)) < sizeof(s->field) ? ESP_OK : ESP_ERR_INVALID_ARG
+        STR(username);
+        STR(password);
+        STR(auth_token);
+        STR(work_network);
+        STR(channel);
+        STR(wifi_ssid);
+        STR(wifi_pass);
+#undef STR
+        if (!strcmp(key, "network")) {
+            if (!strcmp(value, "work")) s->network = ZELLO_NET_WORK;
+            else if (!strcmp(value, "consumer")) s->network = ZELLO_NET_CONSUMER;
+            else return ESP_ERR_INVALID_ARG;
+        } else if (!strcmp(key, "volume")) {
+            if (!yaml_u32(value, 100, &number)) return ESP_ERR_INVALID_ARG;
+            s->volume = number;
+        } else if (!strcmp(key, "mic_gain")) {
+            if (!yaml_u32(value, 42, &number)) return ESP_ERR_INVALID_ARG;
+            s->mic_gain = number;
+        } else if (!strcmp(key, "auto_connect")) {
+            if (!yaml_bool(value, &s->auto_connect)) return ESP_ERR_INVALID_ARG;
+        } else if (!strcmp(key, "ptt_latch")) {
+            if (!yaml_bool(value, &s->ptt_latch)) return ESP_ERR_INVALID_ARG;
+        }
+        return ESP_OK;
+    }
+
+    if (!strcmp(section, "channels")) {
+        b->has_channels = true;
+        if (!key) return ESP_OK;
+        if (item < 0) return ESP_ERR_INVALID_ARG;  // a map where the list should be
+        if (b->count == 0 || item != b->item) {
+            if (b->count == CHANNEL_LIST_MAX) return ESP_OK;  // the rest will not fit anyway
+            memset(&b->channels[b->count++], 0, sizeof(b->channels[0]));
+            b->item = item;
+        }
+        channel_entry_t *e = &b->channels[b->count - 1];
+        if (!strcmp(key, "name")) {
+            if (strlcpy(e->name, value, sizeof(e->name)) >= sizeof(e->name)) return ESP_ERR_INVALID_ARG;
+        } else if (!strcmp(key, "desc")) {
+            if (strlcpy(e->desc, value, sizeof(e->desc)) >= sizeof(e->desc)) return ESP_ERR_INVALID_ARG;
+        } else if (!strcmp(key, "favorite")) {
+            if (!yaml_bool(value, &e->favorite)) return ESP_ERR_INVALID_ARG;
+        } else if (!strcmp(key, "uses")) {
+            if (!yaml_u32(value, UINT32_MAX, &e->uses)) return ESP_ERR_INVALID_ARG;
+        }
+        return ESP_OK;
+    }
+    return ESP_OK;  // an unknown section is ignored
+}
+
+// Reads the <settings> element out of an old XML backup. `*found` says whether
+// there was one at all: a bare channel list is a valid thing to import.
+static esp_err_t backup_parse_settings_xml(const char *xml, settings_t *settings, bool *found)
 {
     const char *element = xml_find_element(xml, "settings");
     *found = element != NULL;
@@ -592,17 +635,93 @@ static esp_err_t backup_file_write(void *ctx, const char *data, size_t len)
 // GET /api/export: all settings and the channel list as one download.
 static esp_err_t h_export_download(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "application/xml");
+    httpd_resp_set_type(req, "application/yaml");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"" BACKUP_FILE_NAME "\"");
     esp_err_t err = backup_write(backup_http_write, req);
     return err == ESP_OK ? httpd_resp_send_chunk(req, NULL, 0) : err;
 }
 
-static esp_err_t import_backup(httpd_req_t *req, const char *xml, const char *what)
+static esp_err_t import_result(httpd_req_t *req, size_t count, const char *what, bool has_settings,
+                               bool has_channels, bool wifi_changed, bool reconnecting)
 {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "count", count);
+    cJSON_AddStringToObject(root, "from", what);
+    cJSON_AddBoolToObject(root, "settings", has_settings);
+    cJSON_AddBoolToObject(root, "channels", has_channels);
+    cJSON_AddBoolToObject(root, "wifi_changed", wifi_changed);
+    cJSON_AddBoolToObject(root, "reconnecting", reconnecting);
+    return send_json(req, root);
+}
+
+static esp_err_t import_yaml(httpd_req_t *req, const char *text, const char *what)
+{
+    yaml_backup_t *b = heap_caps_calloc(1, sizeof(*b), MALLOC_CAP_SPIRAM);
+    channel_entry_t *list = heap_caps_malloc(CHANNEL_LIST_MAX * sizeof(*list), MALLOC_CAP_SPIRAM);
+    if (!b || !list) {
+        free(b);
+        free(list);
+        return httpd_resp_send_500(req);
+    }
+    b->settings = g_settings;
+    b->channels = list;
+
+    int line = 0;
+    esp_err_t err = yaml_parse(text, backup_yaml_value, b, &line);
+    char msg[96];
+    const char *fail = NULL, *status = "400 Bad Request";
+    if (err == ESP_ERR_INVALID_VERSION) {
+        fail = "This backup is from a newer version; nothing was changed.";
+    } else if (err == ESP_ERR_INVALID_ARG) {
+        snprintf(msg, sizeof(msg), "Line %d of the backup isn't valid; nothing was changed.", line);
+        fail = msg;
+    } else if (err != ESP_OK) {
+        fail = "Import failed; nothing was changed.";
+        status = "500 Internal Server Error";
+    } else if (!b->has_settings && !b->has_channels) {
+        fail = "That file has no settings or channels; nothing was changed.";
+    }
+
+    // An empty list in the file leaves the device's list alone rather than
+    // wiping it.
+    size_t count = channel_list_count();
+    bool channels_replaced = false;
+    if (!fail && b->count) {
+        err = channel_list_replace(b->channels, b->count, &count);
+        if (err == ESP_OK) {
+            channels_replaced = true;
+        } else if (err != ESP_ERR_NOT_FOUND) {
+            fail = "Import failed; nothing was changed.";
+            status = "500 Internal Server Error";
+        }
+    }
+
+    bool wifi_changed = false, reconnecting = false;
+    if (!fail && b->has_settings && backup_apply_settings(&b->settings, &wifi_changed, &reconnecting) != ESP_OK) {
+        fail = channels_replaced ? "The channel list was restored, but the settings could not be saved."
+                                 : "The settings could not be saved.";
+        status = "500 Internal Server Error";
+    }
+    bool has_settings = b->has_settings;
+    memset(b, 0, sizeof(*b));  // it held the passwords and the token
+    free(b);
+    free(list);
+    if (fail) return send_error(req, status, fail);
+    return import_result(req, count, what, has_settings, channels_replaced, wifi_changed, reconnecting);
+}
+
+// A backup is YAML now; one that starts with '<' is an XML backup from before.
+static esp_err_t import_backup(httpd_req_t *req, const char *text, const char *what)
+{
+    const char *p = text;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (!strncmp(p, "\xEF\xBB\xBF", 3)) p += 3;
+    if (*p != '<') return import_yaml(req, text, what);
+
+    const char *xml = text;
     settings_t restored;
     bool has_settings;
-    esp_err_t err = backup_parse_settings(xml, &restored, &has_settings);
+    esp_err_t err = backup_parse_settings_xml(xml, &restored, &has_settings);
     if (err == ESP_ERR_INVALID_VERSION) {
         return send_error(req, "400 Bad Request", "This backup uses an unsupported settings version.");
     }
@@ -624,13 +743,7 @@ static esp_err_t import_backup(httpd_req_t *req, const char *xml, const char *wh
                           "The channel list was restored, but the settings could not be saved.");
     }
 
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "count", count);
-    cJSON_AddStringToObject(root, "from", what);
-    cJSON_AddBoolToObject(root, "settings", has_settings);
-    cJSON_AddBoolToObject(root, "wifi_changed", wifi_changed);
-    cJSON_AddBoolToObject(root, "reconnecting", reconnecting);
-    return send_json(req, root);
+    return import_result(req, count, what, has_settings, true, wifi_changed, reconnecting);
 }
 
 // POST /api/import: the body is a complete backup, or just a channel list.
@@ -714,45 +827,28 @@ static esp_err_t backup_read_file(const char *path, char **out)
 static esp_err_t h_sd_import(httpd_req_t *req)
 {
     if (sdcard_mount() != ESP_OK) return sd_error(req);
-    char *xml = NULL;
-    esp_err_t err = backup_read_file(SD_BACKUP_PATH, &xml);
+    char *text = NULL;
+    esp_err_t err = backup_read_file(SD_BACKUP_PATH, &text);
+    if (err == ESP_ERR_NOT_FOUND) err = backup_read_file(SD_LEGACY_BACKUP_PATH, &text);
     if (err == ESP_ERR_NOT_FOUND) {
         return send_error(req, "404 Not Found", "No " BACKUP_FILE_NAME " on the SD card.");
     }
     if (err == ESP_ERR_INVALID_SIZE) return send_error(req, "400 Bad Request", "That file is empty or too large.");
     if (err != ESP_OK) return send_error(req, "500 Internal Server Error", "Couldn't read the SD card backup.");
-    err = import_backup(req, xml, "sd");
-    memset(xml, 0, strlen(xml));
-    free(xml);
+    err = import_backup(req, text, "sd");
+    memset(text, 0, strlen(text));
+    free(text);
     return err;
-}
-
-// Phones probe fixed URLs (generate_204, hotspot-detect.html, ...) to detect
-// a captive portal; sending those to the page makes the setup sheet pop up.
-static esp_err_t h_not_found(httpd_req_t *req, httpd_err_code_t err)
-{
-    httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/");
-    return httpd_resp_send(req, NULL, 0);
 }
 
 // ---- hotspot lifetime ------------------------------------------------------
 
+// The hotspot goes as soon as station Wi-Fi has an address; from then on the
+// web config is reached on the network the device joined.
 static void ap_stop_task(void *arg)
 {
-    while (net_wifi_ap_active()) {
-        while (net_wifi_ap_active() && !net_wifi_has_ip()) vTaskDelay(pdMS_TO_TICKS(500));
-        if (!net_wifi_ap_active()) break;
-
-        TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(AP_LINGER_MS);
-        while (net_wifi_ap_active() && net_wifi_has_ip() && (int32_t)(deadline - xTaskGetTickCount()) > 0) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
-        if (net_wifi_has_ip()) {
-            s_dns_run = false;
-            net_wifi_ap_stop();
-        }
-    }
+    while (net_wifi_ap_active() && !net_wifi_has_ip()) vTaskDelay(pdMS_TO_TICKS(500));
+    if (net_wifi_ap_active()) net_wifi_ap_stop();
     s_ap_stop_pending = false;
     vTaskDelete(NULL);
 }
@@ -797,15 +893,12 @@ esp_err_t web_config_start(void)
         {.uri = "/api/sd/import", .method = HTTP_POST, .handler = h_sd_import},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) httpd_register_uri_handler(s_httpd, &uris[i]);
-    httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, h_not_found);
 
     onboard_set_web_cb(onboard_changed);
 
     // Until onboarding is done, also offer the setup hotspot. Its monitor
     // turns it off after station Wi-Fi has a confirmed IP.
     if (!onboard_complete() && net_wifi_ap_start() == ESP_OK) {
-        s_dns_run = true;
-        xTaskCreate(dns_task, "web_dns", 3072, NULL, 4, NULL);
         onboard_changed();
     }
     ESP_LOGI(TAG, "web config on port 80%s", net_wifi_ap_active() ? " (setup hotspot up)" : "");

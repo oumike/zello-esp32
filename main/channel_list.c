@@ -322,6 +322,33 @@ esp_err_t channel_list_import_buffer(const char *xml, size_t *count)
     return err;
 }
 
+esp_err_t channel_list_replace(const channel_entry_t *entries, size_t n, size_t *count)
+{
+    channel_entry_t *saved = malloc(sizeof(s_list));
+    if (!saved) return ESP_ERR_NO_MEM;
+
+    lock();
+    memcpy(saved, s_list, sizeof(s_list));
+    size_t saved_count = s_count;
+    s_count = 0;
+    for (size_t i = 0; i < n && s_count < CHANNEL_LIST_MAX; i++) {
+        if (!entries[i].name[0] || index_of(entries[i].name) >= 0) continue;  // keep the first of a name
+        s_list[s_count++] = entries[i];
+    }
+    sort_list();
+    size_t added = s_count;
+    esp_err_t err = added ? save_locked() : ESP_ERR_NOT_FOUND;
+    if (err != ESP_OK) {  // leave the list as it was
+        memcpy(s_list, saved, sizeof(s_list));
+        s_count = saved_count;
+    }
+    unlock();
+    free(saved);
+    if (count) *count = added;
+    if (err == ESP_OK) notify();
+    return err;
+}
+
 void channel_list_set_changed_cb(void (*cb)(void))
 {
     s_changed_cb = cb;

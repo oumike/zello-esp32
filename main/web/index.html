@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zello Setup</title>
+<title>Scheff for Zello</title>
 <style>
 :root{--bg:#0b0d10;--panel:#171a20;--line:#2a2f38;--text:#e8ebef;--muted:#9aa3ad;--accent:#f5c518;--link:#2f7df6;--go:#1f9d55;--stop:#d23c3c;--warn:#e0a526}
 *{box-sizing:border-box}
@@ -48,11 +48,15 @@ button:disabled{opacity:.5;cursor:default}
 .inline span{width:3.5rem;text-align:right;color:var(--muted);font-size:.9rem}
 .check{display:flex;gap:10px;align-items:center;margin-top:14px;color:var(--muted);font-size:.9rem}
 .check input{width:auto}
+/* One Save for the account and audio, pinned to the bottom of the screen. */
+#savebar{position:sticky;bottom:0;margin:0 -16px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(11,13,16,.94);border-top:1px solid var(--line);backdrop-filter:blur(6px)}
+#savebar button{margin-top:0}
+#savebar .msg{margin:0 0 10px}
 </style>
 </head>
 <body>
 <main>
-<h1>Zello<span>·</span>P4</h1>
+<h1>Scheff <span>for</span> Zello</h1>
 <p class="sub">Set up Wi-Fi, your Zello account and a channel. The device screen follows along.</p>
 
 <section id="s-status">
@@ -96,8 +100,6 @@ button:disabled{opacity:.5;cursor:default}
     <label for="wnet">Zello Work network name</label>
     <input id="wnet" maxlength="47" autocapitalize="off" autocomplete="off" placeholder="the subdomain of your network">
   </div>
-  <button id="save" class="go" type="button">Save account</button>
-  <div id="amsg" class="msg"></div>
 </section>
 
 <section id="s-chan">
@@ -113,9 +115,8 @@ button:disabled{opacity:.5;cursor:default}
     <input id="f-name" maxlength="64" autocapitalize="off" autocomplete="off" placeholder="e.g. My Channel">
     <label for="f-desc">Note (optional)</label>
     <input id="f-desc" maxlength="63" placeholder="Only shown here">
-    <button id="f-save" class="go" type="button">Save</button>
+    <p class="hint">Save at the bottom of the page keeps it; Close drops the change.</p>
     <button id="f-del" class="stop" type="button">Delete</button>
-    <button id="f-cancel" class="plain" type="button">Cancel</button>
   </div>
   <div id="cmsg" class="msg"></div>
 </section>
@@ -136,23 +137,37 @@ button:disabled{opacity:.5;cursor:default}
   <div class="inline"><label for="vol" style="margin:0;width:5rem">Speaker</label><input id="vol" type="range" min="0" max="100"><span id="volv"></span></div>
   <div class="inline"><label for="gain" style="margin:0;width:5rem">Mic gain</label><input id="gain" type="range" min="0" max="42"><span id="gainv"></span></div>
   <label class="check"><input id="latch" type="checkbox"> Tap to talk instead of holding the button</label>
-  <div id="aumsg" class="msg"></div>
 </section>
 
 <section id="s-backup">
   <h2>Backup</h2>
-  <p class="hint">Save or restore all device settings and the channel list. The backup contains your Wi-Fi password, your Zello password and your developer token; store it securely.</p>
+  <p class="hint">Save or restore all device settings and the channel list as one YAML file, which is readable and safe to edit by hand. Older XML backups still import. The backup contains your Wi-Fi password, your Zello password and your developer token; store it securely.</p>
   <button id="dl" type="button">Download complete backup</button>
   <button id="up" class="plain" type="button">Import a backup from this computer…</button>
-  <input id="upfile" type="file" accept=".xml,application/xml,text/xml" hidden>
+  <input id="upfile" type="file" accept=".yaml,.yml,.xml,application/yaml,text/yaml,application/xml,text/xml" hidden>
   <button id="sdx" type="button">Export to SD card</button>
   <button id="sdi" class="plain" type="button">Import from SD card</button>
   <div id="bmsg" class="msg"></div>
 </section>
+<div id="savebar">
+  <div id="smsg" class="msg"></div>
+  <button id="save" class="go" type="button" disabled>No unsaved changes</button>
+</div>
 </main>
 <script>
 const $=id=>document.getElementById(id);
 let joining=false,filled=false,audioFilled=false;
+// Unsaved edits per group: Save sends only those, so a volume change does not
+// make the device sign in to Zello again.
+const dirty={account:false,audio:false,channel:false};
+function restored(j,where){
+  const parts=[];
+  if(j.settings)parts.push('all settings');
+  if(j.channels)parts.push(j.count+' channels');
+  return (parts.length?'Restored '+parts.join(' and '):'Nothing changed')+(where||'')+'.'+
+    (j.settings&&!j.channels?' The channel list was left as it was.':'')+
+    (!j.settings&&j.channels?' Settings were left as they were.':'');
+}
 function msg(el,cls,text){el.className='msg show '+cls;el.textContent=text}
 function row(k,v){return '<div class="row"><span>'+k+'</span><span>'+v+'</span></div>'}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -184,7 +199,7 @@ async function refresh(){
   $('s-wifi').classList.toggle('done',!!w.ssid);
   $('s-acct').classList.toggle('done',!!(a.username&&a.has_password&&(a.network==='work'?a.work_network:a.has_token)));
   $('s-chan').classList.toggle('done',!!z.channel);
-  if(!filled){
+  if(!filled&&!dirty.account){
     filled=true;
     if(w.ssid)$('ssid').value=w.ssid;
     $('network').value=a.network;$('user').value=a.username||'';$('wnet').value=a.work_network||'';
@@ -192,7 +207,7 @@ async function refresh(){
     if(a.has_token)$('token').placeholder='(saved - leave blank to keep)';
     showNetworkFields();
   }
-  if(!audioFilled){
+  if(!audioFilled&&!dirty.audio){
     audioFilled=true;
     $('vol').value=s.audio.volume;$('volv').textContent=s.audio.volume+'%';
     $('gain').value=s.audio.mic_gain;$('gainv').textContent=s.audio.mic_gain+' dB';
@@ -227,16 +242,50 @@ $('join').onclick=async()=>{
   try{await api('/api/wifi',{ssid,pass:$('wpass').value});joining=true;msg($('wmsg'),'busy','Connecting to '+ssid+'…')}
   catch(e){msg($('wmsg'),'err',e.message)}
 };
+// ---- save ----
+function saveButton(){
+  const any=dirty.account||dirty.audio||dirty.channel,b=$('save');
+  b.disabled=!any;b.textContent=any?'Save settings':'No unsaved changes';
+}
+function markDirty(group){dirty[group]=true;$('smsg').className='msg';saveButton()}
+function markClean(){dirty.account=dirty.audio=dirty.channel=false;saveButton()}
+['network','user','apass','token','wnet'].forEach(id=>{$(id).addEventListener('input',()=>markDirty('account'));
+  $(id).addEventListener('change',()=>markDirty('account'))});
 $('save').onclick=async()=>{
+  const b=$('save');
+  const cname=$('f-name').value.trim();
+  if(dirty.channel&&!cname){msg($('smsg'),'err','Give the channel a name, or close it.');$('f-name').focus();return}
+  b.disabled=true;b.textContent='Saving…';
+  const done=[];
   try{
-    await api('/api/account',{network:$('network').value,username:$('user').value.trim(),password:$('apass').value,
-      auth_token:$('token').value.trim(),work_network:$('wnet').value.trim()});
-    msg($('amsg'),'ok','Saved. The device is signing in to Zello.');
-    $('apass').value='';$('token').value='';filled=false;refresh();
-  }catch(e){msg($('amsg'),'err',e.message)}
+    if(dirty.audio){
+      await api('/api/audio',{volume:+$('vol').value,mic_gain:+$('gain').value,ptt_latch:$('latch').checked});
+      dirty.audio=false;done.push('Audio saved.');
+    }
+    if(dirty.account){
+      await api('/api/account',{network:$('network').value,username:$('user').value.trim(),password:$('apass').value,
+        auth_token:$('token').value.trim(),work_network:$('wnet').value.trim()});
+      dirty.account=false;done.push('Account saved; the device is signing in to Zello.');
+      $('apass').value='';$('token').value='';filled=false;
+    }
+    if(dirty.channel){
+      const isNew=!editing;
+      await api('/api/channels',{orig_name:editing?editing.name:'',name:cname,desc:$('f-desc').value.trim()});
+      // Adding one by hand means you want to be in it.
+      if(isNew)await api('/api/channels/join',{name:cname});
+      dirty.channel=false;done.push((isNew?'Added and joining ':'Saved channel ')+cname+'.');
+      closeForm();$('q').value='';loadChannels();
+    }
+    markClean();msg($('smsg'),'ok',done.join(' '));refresh();
+  }catch(e){
+    // Whatever did save is no longer dirty; the rest stays for another try.
+    msg($('smsg'),'err',(done.length?done.join(' ')+' ':'')+e.message);
+    b.disabled=false;b.textContent='Save settings';
+  }
 };
 // ---- channels ----
-let channels=[],editing=null;
+// The channel form is open for `editing` (null: a new channel) while formOpen.
+let channels=[],editing=null,formOpen=false;
 function renderChannels(){
   const q=$('q').value.trim();
   $('clist').innerHTML=channels.length?channels.map((c,i)=>
@@ -246,7 +295,8 @@ function renderChannels(){
       '<button class="star'+(c.favorite?' on':'')+'" data-f="'+i+'" type="button" title="'+(c.favorite?'Unfavorite':'Favorite')+'">'+
       (c.favorite?'&#9733;':'&#9734;')+'</button>'+
       '<button class="go" data-j="'+i+'" type="button">Join</button>'+
-      '<button class="plain" data-i="'+i+'" type="button">Edit</button></div></div>').join('')
+      '<button class="plain" data-i="'+i+'" type="button">'+(formOpen&&editing&&editing.name===c.name?'Close':'Edit')+
+      '</button></div></div>').join('')
     :'<p class="hint">'+(q?'No channels match “'+esc(q)+'”.':'No channels yet. Tap “Add a channel”.')+'</p>';
 }
 async function loadChannels(){
@@ -257,13 +307,21 @@ async function loadChannels(){
   renderChannels();
 }
 function openForm(c){
-  editing=c;$('cform').style.display='block';$('cftitle').textContent=c?'Edit channel':'New channel';
+  editing=c;formOpen=true;$('cform').style.display='block';$('cftitle').textContent=c?'Edit channel':'New channel';
   $('f-name').value=c?c.name:'';$('f-desc').value=c?c.desc:'';
   $('f-del').style.display=c?'block':'none';$('cmsg').className='msg';$('f-name').focus();
+  dirty.channel=!c;saveButton();  // a new channel is unsaved from the start
+  $('add').textContent=c?'Add a channel':'Close';renderChannels();
 }
-function closeForm(){editing=null;$('cform').style.display='none'}
+// Closing drops whatever the form held.
+function closeForm(){
+  editing=null;formOpen=false;$('cform').style.display='none';
+  dirty.channel=false;saveButton();$('add').textContent='Add a channel';renderChannels();
+}
+['f-name','f-desc'].forEach(id=>$(id).addEventListener('input',()=>markDirty('channel')));
 $('clist').onclick=async e=>{
-  const edit=e.target.closest('button[data-i]');if(edit){openForm(channels[+edit.dataset.i]);return}
+  const edit=e.target.closest('button[data-i]');
+  if(edit){const c=channels[+edit.dataset.i];(formOpen&&editing&&editing.name===c.name)?closeForm():openForm(c);return}
   const join=e.target.closest('button[data-j]');
   if(join){
     const c=channels[+join.dataset.j];
@@ -278,19 +336,7 @@ $('clist').onclick=async e=>{
 };
 let qTimer;
 $('q').oninput=()=>{clearTimeout(qTimer);qTimer=setTimeout(()=>{closeForm();loadChannels()},300)};
-$('add').onclick=()=>openForm(null);
-$('f-cancel').onclick=closeForm;
-$('f-save').onclick=async()=>{
-  const name=$('f-name').value.trim();
-  const isNew=!editing;
-  try{
-    await api('/api/channels',{orig_name:editing?editing.name:'',name,desc:$('f-desc').value.trim()});
-    // Adding one by hand means you want to be in it.
-    if(isNew)await api('/api/channels/join',{name});
-    closeForm();msg($('cmsg'),'ok',(isNew?'Added and joining ':'Saved ')+name+'.');
-    $('q').value='';loadChannels();refresh();
-  }catch(e){msg($('cmsg'),'err',e.message)}
-};
+$('add').onclick=()=>(formOpen&&!editing)?closeForm():openForm(null);
 $('f-del').onclick=async()=>{
   if(!editing||!confirm('Delete '+editing.name+' from your channels?'))return;
   try{await api('/api/channels/delete',{name:editing.name});msg($('cmsg'),'ok','Deleted '+editing.name+'.');closeForm();loadChannels()}
@@ -306,18 +352,9 @@ async function sendText(){
 $('send').onclick=sendText;
 $('text').onkeydown=e=>{if(e.key==='Enter')sendText()};
 // ---- audio ----
-let audioTimer;
-function pushAudio(){
-  clearTimeout(audioTimer);
-  audioTimer=setTimeout(async()=>{
-    try{await api('/api/audio',{volume:+$('vol').value,mic_gain:+$('gain').value,ptt_latch:$('latch').checked});
-      $('aumsg').className='msg'}
-    catch(e){msg($('aumsg'),'err',e.message)}
-  },250);
-}
-$('vol').oninput=()=>{$('volv').textContent=$('vol').value+'%';pushAudio()};
-$('gain').oninput=()=>{$('gainv').textContent=$('gain').value+' dB';pushAudio()};
-$('latch').onchange=pushAudio;
+$('vol').oninput=()=>{$('volv').textContent=$('vol').value+'%';markDirty('audio')};
+$('gain').oninput=()=>{$('gainv').textContent=$('gain').value+' dB';markDirty('audio')};
+$('latch').onchange=()=>markDirty('audio');
 // ---- backup ----
 $('dl').onclick=()=>{location.href='/api/export'};
 $('up').onclick=()=>$('upfile').click();
@@ -325,11 +362,11 @@ $('upfile').onchange=async e=>{
   const f=e.target.files[0];e.target.value='';
   if(!f||!confirm('Restore settings and replace the channel list from '+f.name+'?'))return;
   msg($('bmsg'),'busy','Importing '+f.name+'…');
-  try{const r=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/xml'},body:await f.text()});
+  try{const r=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/yaml'},body:await f.text()});
     const j=await r.json();if(!r.ok)throw new Error(j.error||'Import failed');
-    const done=j.settings?'Restored all settings and '+j.count+' channels.':'Imported '+j.count+' channels; settings were unchanged.';
+    const done=restored(j);
     msg($('bmsg'),'ok',done+(j.reconnecting?' The device is reconnecting to the restored Wi-Fi network.':''));
-    filled=false;audioFilled=false;refresh();loadChannels()}
+    markClean();filled=false;audioFilled=false;refresh();loadChannels()}
   catch(e){msg($('bmsg'),'err',e.message)}
 };
 $('sdx').onclick=async()=>{
@@ -341,9 +378,9 @@ $('sdi').onclick=async()=>{
   if(!confirm('Restore settings and replace the channel list from the SD card backup?'))return;
   msg($('bmsg'),'busy','Reading the SD card…');
   try{const j=await api('/api/sd/import',{});
-    const done=j.settings?'Restored all settings and '+j.count+' channels from the SD card.':'Imported '+j.count+' channels; settings were unchanged.';
+    const done=restored(j,' from the SD card');
     msg($('bmsg'),'ok',done+(j.reconnecting?' The device is reconnecting to the restored Wi-Fi network.':''));
-    filled=false;audioFilled=false;refresh();loadChannels()}
+    markClean();filled=false;audioFilled=false;refresh();loadChannels()}
   catch(e){msg($('bmsg'),'err',e.message)}
 };
 showNetworkFields();

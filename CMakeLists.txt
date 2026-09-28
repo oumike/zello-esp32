@@ -4,4 +4,4 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 set(PROJECT_VER "0.1.0")
 
-project(zello-esp32)
+project(scheff-zello)

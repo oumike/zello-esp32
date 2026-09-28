@@ -39,6 +39,12 @@ static const char *TAG = "zello";
 
 #define WS_BUFFER_SIZE  2048
 #define WS_TASK_STACK   8192
+// libopus is built with VAR_ARRAYS, so its scratch buffers live on the calling
+// task's stack and how deep it goes depends on the audio. The encoder
+// overflowed 16 KB and was measured at ~25 KB; the decoder peaks near 4 KB.
+// Both come out of internal RAM, which TLS also needs.
+#define TX_TASK_STACK   32768
+#define RX_TASK_STACK   16384
 #define SEND_TIMEOUT_MS 400
 
 // How long a start_stream may go unanswered before we give up on the press.
@@ -334,10 +340,22 @@ void zello_mic_frame(const int16_t *pcm, size_t samples)
     xQueueSend(s_tx_q, pcm, 0);
 }
 
+// Logs each new low in a codec task's stack headroom, so the margin above
+// libopus's deepest path shows up in the log before it runs out.
+static void log_stack_low(UBaseType_t *low)
+{
+    UBaseType_t free = uxTaskGetStackHighWaterMark(NULL);
+    if (free < *low) {
+        *low = free;
+        ESP_LOGI(TAG, "%s stack headroom %u bytes", pcTaskGetName(NULL), (unsigned)free);
+    }
+}
+
 static void tx_task(void *arg)
 {
     tx_frame_t *frame = malloc(sizeof(*frame));
     uint8_t *packet = malloc(PKT_HEADER_LEN + PACKET_MAX);
+    UBaseType_t stack_low = TX_TASK_STACK;
     if (!frame || !packet) {
         ESP_LOGE(TAG, "no memory for the transmit path");
         vTaskDelete(NULL);
@@ -353,6 +371,7 @@ static void tx_task(void *arg)
         if (!stream) continue;  // released while this frame was queued
 
         int len = opus_codec_encode(frame->pcm, packet + PKT_HEADER_LEN, PACKET_MAX);
+        log_stack_low(&stack_low);
         if (len <= 0) {
             ESP_LOGW(TAG, "encode failed (%d)", len);
             continue;
@@ -377,6 +396,7 @@ static void rx_task(void *arg)
 {
     rx_packet_t *packet = malloc(sizeof(*packet));
     int16_t *pcm = malloc(DECODE_MAX * sizeof(int16_t));
+    UBaseType_t stack_low = RX_TASK_STACK;
     if (!packet || !pcm) {
         ESP_LOGE(TAG, "no memory for the receive path");
         vTaskDelete(NULL);
@@ -384,6 +404,7 @@ static void rx_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_rx_q, packet, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
             int samples = opus_codec_decode(packet->data, packet->len, pcm, DECODE_MAX);
+            log_stack_low(&stack_low);
             if (samples > 0) {
                 audio_play_push(pcm, samples);
             } else {
@@ -686,10 +707,10 @@ esp_err_t zello_init(void)
     esp_err_t err = opus_codec_init();
     if (err != ESP_OK) return err;
 
-    // Opus needs a few kilobytes of stack of its own, so both codec paths get
+    // Opus needs tens of kilobytes of stack of its own, so both codec paths get
     // their own task rather than running on the capture or socket tasks.
-    if (xTaskCreate(tx_task, "zello_tx", 16384, NULL, 18, NULL) != pdPASS ||
-        xTaskCreate(rx_task, "zello_rx", 16384, NULL, 17, NULL) != pdPASS) {
+    if (xTaskCreate(tx_task, "zello_tx", TX_TASK_STACK, NULL, 18, NULL) != pdPASS ||
+        xTaskCreate(rx_task, "zello_rx", RX_TASK_STACK, NULL, 17, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

@@ -98,7 +98,7 @@ esp_err_t net_wifi_init(void)
     esp_err_t err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
     s_netif = esp_netif_create_default_wifi_sta();
-    esp_netif_set_hostname(s_netif, "zello-p4");
+    esp_netif_set_hostname(s_netif, "scheff-zello");
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init");
@@ -238,25 +238,15 @@ esp_err_t net_wifi_ap_start(void)
 {
     if (s_ap_on) return ESP_OK;
     if (!s_ap_netif) {
+        // No captive portal: nothing answers DNS here, so a phone treats the
+        // hotspot as a network without internet and leaves the browser alone.
+        // The setup page is at http://192.168.4.1.
         s_ap_netif = esp_netif_create_default_wifi_ap();
-        // Hand out the hotspot itself as DNS server (the web config answers
-        // every name with 192.168.4.1) and advertise the captive-portal URL,
-        // so phones open the setup page on their own.
-        static const char portal_uri[] = "http://192.168.4.1/";
-        esp_netif_dns_info_t dns = {.ip.type = ESP_IPADDR_TYPE_V4};
-        dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(192, 168, 4, 1);
-        uint8_t offer = 0x02;  // OFFER_DNS
-        esp_netif_dhcps_stop(s_ap_netif);
-        esp_netif_set_dns_info(s_ap_netif, ESP_NETIF_DNS_MAIN, &dns);
-        esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer, sizeof(offer));
-        esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, (void *)portal_uri,
-                               strlen(portal_uri));
-        esp_netif_dhcps_start(s_ap_netif);
     }
 
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "Zello-P4-%02X%02X", mac[4], mac[5]);
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "Scheff-%02X%02X", mac[4], mac[5]);
     wifi_config_t ap = {
         .ap = {
             .channel = 1,

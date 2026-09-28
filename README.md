@@ -1,6 +1,6 @@
-# zello-esp32
+# Scheff for Zello
 
-A [Zello](https://zello.com) push-to-talk client for the **LilyGO T-Display-P4**
+**Scheff for Zello** (`scheff-zello`) is a [Zello](https://zello.com) push-to-talk client for the **LilyGO T-Display-P4**
 (ESP32-P4 + ESP32-C6), built on ESP-IDF with an LVGL touch UI.
 
 It signs in to the [Zello Channels API](https://github.com/zelloptt/zello-channel-api)
@@ -10,8 +10,8 @@ hardware. Everything is configurable from the touch screen or from a browser.
 
 Board bring-up (display, touch, audio, power rails, Wi-Fi coprocessor) follows
 `camillia-mt` and `echolink-p4`, and the setup flow is deliberately the same
-shape as `echolink-p4`'s: a captive-portal hotspot on first boot, step-by-step
-onboarding mirrored on screen and in the browser, and one XML file that backs up
+shape as `echolink-p4`'s: a setup hotspot on first boot, step-by-step
+onboarding mirrored on screen and in the browser, and one YAML file that backs up
 every setting.
 
 ```
@@ -61,9 +61,10 @@ Three steps, and each one can be done on the screen **or** in the browser — th
 other side follows along.
 
 On first boot the device brings up an open Wi-Fi hotspot named
-`Zello-P4-XXXX` with a captive DNS that answers every name, so a phone pops the
-setup page by itself. Otherwise open `http://<device-ip>`; the address is shown
-at the bottom of every setup screen. The hotspot shuts down a minute after the
+`Scheff-XXXX`. Join it and open `http://192.168.4.1`; there is deliberately no
+captive portal, so nothing pops up or takes over the phone's browser. Once the
+device is on your network, open `http://<device-ip>` instead; the address is
+shown at the bottom of every setup screen. The hotspot shuts down as soon as the
 station link gets an IP.
 
 ### 1. Wi-Fi
@@ -114,34 +115,46 @@ The home screen is also the talk screen:
 
 ## Backup and restore
 
-*Backup* in the web config writes one XML file holding **every** setting and the
-whole channel list:
+*Backup* in the web config writes one YAML file holding **every** setting and
+the whole channel list:
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<zello-backup version="1">
-  <settings version="1" network="consumer" username="n0call" password="..."
-            auth_token="eyJ..." work_network="" channel="My Channel"
-            wifi_ssid="HomeWiFi" wifi_pass="..." volume="70" mic_gain="30"
-            auto_connect="true" ptt_latch="false"/>
-  <channels>
-    <channel name="My Channel" desc="Weekend net" favorite="true" uses="12"/>
-  </channels>
-</zello-backup>
+```yaml
+# Scheff for Zello backup: every setting and the channel list.
+scheff-backup: 1
+settings:
+  network: "consumer"
+  username: "n0call"
+  password: "..."
+  auth_token: "eyJ..."
+  work_network: ""
+  channel: "My Channel"
+  wifi_ssid: "HomeWiFi"
+  wifi_pass: "..."
+  volume: 70
+  mic_gain: 30
+  auto_connect: true
+  ptt_latch: false
+channels:
+  - name: "My Channel"
+    desc: "Weekend net"
+    favorite: true
+    uses: 12
 ```
 
-Download it, or write it to a microSD card as `zello-p4-backup.xml`. Import
-accepts either, and also accepts a bare `<channels>` list (the same shape as
-`/data/zello-channels.xml` on the device), in which case the settings are left
-alone. Restoring a backup with different Wi-Fi credentials reconnects on the
-spot.
+Download it, or write it to a microSD card as `scheff-zello-backup.yaml`. It is
+safe to edit by hand: a file may leave out `settings` or `channels` (or any
+single setting), and whatever it leaves out stays as it is on the device; an
+empty `channels: []` leaves the list alone too. Import reports the line number
+of anything it cannot read and then changes nothing. Old XML backups
+(`zello-p4-backup.xml`, from before the rename) still import. Restoring a backup with different Wi-Fi
+credentials reconnects on the spot.
 
 **The backup contains your Wi-Fi password, your Zello password and your
 developer token in clear text.** Store it accordingly.
 
 ## Serial console
 
-115200 baud, `zello>` prompt. `help` lists everything; the useful ones:
+115200 baud, `scheff>` prompt. `help` lists everything; the useful ones:
 
 ```
 status                      Wi-Fi, sign-in state, channel, packet counts
@@ -173,9 +186,10 @@ loopback [on|off]           mic to speaker, for audio bring-up
 | `channel_list.c` | The saved channels, as XML on the internal FAT partition |
 | `settings.c` | NVS-backed settings, one table describing every field |
 | `onboard.c` | The three onboarding steps, shared by the screen and the browser |
-| `web_config.c` | HTTP API, captive DNS, backup export/import |
+| `web_config.c` | HTTP API, the setup hotspot's lifetime, backup export/import |
 | `ui*.c` | LVGL screens: Wi-Fi, account, channels, home/talk |
-| `xml_util.c` | The little XML the channel list and the backup need |
+| `xml_util.c` | The little XML the stored channel list (and old XML backups) need |
+| `yaml_util.c` | The little YAML the backup file needs |
 
 ### Audio and the protocol
 

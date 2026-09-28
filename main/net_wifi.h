@@ -29,7 +29,7 @@ typedef enum {
 } net_join_result_t;
 
 // Setup hotspot (AP+STA), used during onboarding for the web config. SSID is
-// "Zello-P4-XXXX" (last MAC bytes), open (no password).
+// "Scheff-XXXX" (last MAC bytes), open (no password).
 // The AP's own address is 192.168.4.1.
 esp_err_t net_wifi_ap_start(void);
 void net_wifi_ap_stop(void);

@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -13,18 +14,23 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_lvgl_port.h"
+#include "hal/axi_icm_ll.h"
+#include "hal/dw_gdma_ll.h"
 #include "board.h"
 
 static const char *TAG = "display";
 
 // Panel timing and init sequence follow camillia-mt's T-Display P4 port
 // (src/hal/hw_tdisplay_p4.h, tdisplay_p4_display.h), which in turn follows
-// LilyGO's ECO2 RM69A10 example: two lanes at 1 Gbps, 80 MHz pixel clock.
+// LilyGO's ECO2 RM69A10 example: two lanes at 1 Gbps. Their 80 MHz pixel
+// clock (~66 fps) is lowered to 48 MHz (~40 fps): scan-out reads the whole
+// frame buffer from PSRAM every frame, and at 80 MHz it sometimes couldn't
+// keep up, which flashed the panel blue. This UI has no use for 66 fps.
 #define DSI_LANES          2
 #define DSI_LANE_MBPS      1000
 #define DSI_PHY_LDO_CHAN   3
 #define DSI_PHY_LDO_MV     2500
-#define DPI_CLOCK_MHZ      80
+#define DPI_CLOCK_MHZ      48
 #define DPI_HSYNC          50
 #define DPI_HBP            150
 #define DPI_HFP            50
@@ -33,6 +39,7 @@ static const char *TAG = "display";
 #define DPI_VFP            80
 
 #define BRIGHTNESS_DEFAULT 160
+#define DRAW_BUF_LINES     12  // internal RAM: TLS needs what is left
 
 // GT9895 on I2C bus 1. It reports in its own 1060x2400 space, scaled here.
 #define GT9895_ADDR         0x5D
@@ -237,7 +244,10 @@ static esp_err_t panel_init(void)
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
         .dpi_clock_freq_mhz = DPI_CLOCK_MHZ,
         .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
-        .num_fbs = 2,
+        // One frame buffer, scanned out and drawn into but never swapped, as
+        // camillia-mt's LovyanGFX port does. Swapping two PSRAM frame buffers
+        // (LVGL direct mode) flashed the panel blue now and then.
+        .num_fbs = 1,
         .video_timing = {
             .h_size = DISPLAY_H_RES,
             .v_size = DISPLAY_V_RES,
@@ -250,6 +260,11 @@ static esp_err_t panel_init(void)
         },
         .flags.use_dma2d = true,
     };
+    // The scan-out reads the frame buffer from PSRAM through DW-GDMA's memory
+    // port, contending with the CPU cache, DMA2D and SDIO on the AXI bus. When
+    // it loses, the DSI bridge's FIFO underruns and the panel flashes blue
+    // (esp_lcd logs "underrun happens"). Give its reads top priority.
+    axi_icm_ll_set_dw_gdma_qos_arbiter_prio(DW_GDMA_LL_MASTER_PORT_MEMORY, 0, 15);
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_dpi(bus, &dpi_cfg, &s_panel), TAG, "dpi panel");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "dpi init");
 
@@ -281,18 +296,19 @@ esp_err_t display_init(void)
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = s_io,
         .panel_handle = s_panel,
-        .buffer_size = DISPLAY_H_RES * DISPLAY_V_RES,
+        // Partial rendering into small internal buffers; the DPI driver copies
+        // each finished area into the frame buffer with DMA2D.
+        .buffer_size = DISPLAY_H_RES * DRAW_BUF_LINES,
         .double_buffer = true,
         .hres = DISPLAY_H_RES,
         .vres = DISPLAY_V_RES,
         .color_format = LV_COLOR_FORMAT_RGB565,
         .flags = {
-            .buff_spiram = true,
-            .direct_mode = true,
+            .buff_dma = true,
         },
     };
     const lvgl_port_display_dsi_cfg_t dsi_cfg = {
-        .flags.avoid_tearing = true,
+        .flags.avoid_tearing = false,
     };
     lv_display_t *disp = lvgl_port_add_disp_dsi(&disp_cfg, &dsi_cfg);
     ESP_RETURN_ON_FALSE(disp, ESP_FAIL, TAG, "lvgl display");
@@ -314,9 +330,37 @@ esp_err_t display_init(void)
         ESP_LOGE(TAG, "touch unavailable: %s", esp_err_to_name(terr));
     }
 
-    display_set_brightness(BRIGHTNESS_DEFAULT);
-    ESP_LOGI(TAG, "%dx%d AMOLED ready", DISPLAY_H_RES, DISPLAY_V_RES);
+    // The panel stays dark until display_reveal(): until the UI has drawn,
+    // the frame buffers hold nothing worth showing.
+    ESP_LOGI(TAG, "%dx%d AMOLED ready, %u bytes internal RAM free", DISPLAY_H_RES, DISPLAY_V_RES,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     return ESP_OK;
+}
+
+static bool s_test_pattern;
+
+esp_err_t display_set_test_pattern(bool on)
+{
+    if (!s_panel) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = esp_lcd_dpi_panel_set_pattern(s_panel, on ? MIPI_DSI_PATTERN_BAR_HORIZONTAL : MIPI_DSI_PATTERN_NONE);
+    if (err == ESP_OK) s_test_pattern = on;
+    return err;
+}
+
+bool display_test_pattern(void)
+{
+    return s_test_pattern;
+}
+
+void display_reveal(void)
+{
+    if (lvgl_port_lock(0)) {
+        lv_refr_now(NULL);
+        lvgl_port_unlock();
+    }
+    // Let the panel scan out the finished frame before lighting it.
+    vTaskDelay(pdMS_TO_TICKS(50));
+    display_set_brightness(BRIGHTNESS_DEFAULT);
 }
 
 bool display_lock(void)

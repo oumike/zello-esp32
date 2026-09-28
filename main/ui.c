@@ -10,6 +10,7 @@
 #include "onboard.h"
 #include "settings.h"
 #include "ui_internal.h"
+#include "zello_client.h"
 
 static const char *TAG = "ui";
 
@@ -17,6 +18,7 @@ static const char *TAG = "ui";
 #define BATTERY_REFRESH_TICKS   30
 
 static lv_obj_t *s_status_bar, *s_wifi_icon, *s_ap_icon, *s_battery_icon;
+static lv_obj_t *s_zello_arrows[2];
 static uint8_t s_battery_tick;
 
 static const char *battery_symbol(uint8_t percent)
@@ -28,8 +30,49 @@ static const char *battery_symbol(uint8_t percent)
     return LV_SYMBOL_BATTERY_EMPTY;
 }
 
+// The Zello link as an up and a down arrow, drawn as lines since the symbol
+// font has no such glyph. Each arrow is one polyline: shaft, then the head
+// traced out and back from the tip.
+#define ZELLO_ICON_W 24
+#define ZELLO_ICON_H 28
+static const lv_point_precise_t s_arrow_up[] = {{7, 25}, {7, 3}, {1, 9}, {7, 3}, {13, 9}};
+static const lv_point_precise_t s_arrow_down[] = {{17, 3}, {17, 25}, {11, 19}, {17, 25}, {23, 19}};
+
+static lv_obj_t *zello_icon_create(lv_obj_t *parent)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, ZELLO_ICON_W, ZELLO_ICON_H);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    const lv_point_precise_t *const shapes[2] = {s_arrow_up, s_arrow_down};
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *line = lv_line_create(box);
+        lv_line_set_points(line, shapes[i], 5);
+        lv_obj_set_style_line_width(line, 3, 0);
+        lv_obj_set_style_line_rounded(line, true, 0);
+        s_zello_arrows[i] = line;
+    }
+    return box;
+}
+
+// Green online, yellow on the way there, red otherwise.
+static lv_color_t zello_color(void)
+{
+    switch (zello_state()) {
+    case ZELLO_ONLINE: return UI_COLOR_GO_LIT;
+    case ZELLO_CONNECTING:
+    case ZELLO_LOGGING_IN: return UI_COLOR_WARN;
+    default: return UI_COLOR_STOP;
+    }
+}
+
 static void status_update(lv_timer_t *timer)
 {
+    lv_color_t zc = zello_color();
+    for (int i = 0; i < 2; i++) lv_obj_set_style_line_color(s_zello_arrows[i], zc, 0);
+
     lv_color_t wifi_color = net_wifi_has_ip() ? UI_COLOR_GO_LIT
                             : g_settings.wifi_ssid[0] ? UI_COLOR_STOP
                                                       : UI_COLOR_MUTED;
@@ -70,6 +113,8 @@ static void status_ensure(void)
         s_wifi_icon = lv_label_create(s_status_bar);
         lv_label_set_text(s_wifi_icon, LV_SYMBOL_WIFI);
         lv_obj_set_style_text_font(s_wifi_icon, UI_FONT, 0);
+
+        zello_icon_create(s_status_bar);
 
         s_ap_icon = lv_label_create(s_status_bar);
         lv_label_set_text(s_ap_icon, LV_SYMBOL_UPLOAD);
@@ -396,6 +441,25 @@ void ui_web_hint_update(lv_obj_t *label)
     } else {
         lv_label_set_text(label, "");
     }
+}
+
+static void web_hint_tick(lv_timer_t *t)
+{
+    ui_web_hint_update(lv_timer_get_user_data(t));
+}
+
+static void web_hint_deleted(lv_event_t *e)
+{
+    lv_timer_delete(lv_event_get_user_data(e));
+}
+
+lv_obj_t *ui_web_hint(lv_obj_t *parent)
+{
+    lv_obj_t *label = ui_label(parent, "", UI_FONT_SMALL, UI_COLOR_MUTED);
+    ui_web_hint_update(label);
+    lv_timer_t *timer = lv_timer_create(web_hint_tick, STATUS_REFRESH_MS, label);
+    lv_obj_add_event_cb(label, web_hint_deleted, LV_EVENT_DELETE, timer);
+    return label;
 }
 
 // Onboarding: Wi-Fi, then the Zello account, then a channel, then Home for
